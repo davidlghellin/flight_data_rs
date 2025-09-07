@@ -1,0 +1,63 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use anyhow::{anyhow, Result};
+use arrow_array::Array;
+use arrow_flight::{flight_service_client::FlightServiceClient, FlightData, Ticket};
+use bytes::Bytes;
+use tonic::Request;
+
+// IPC: para reconstruir el Schema a partir del primer FlightData
+use arrow_ipc::convert::fb_to_schema;
+use arrow_ipc::root_as_message;
+use arrow_ipc::MessageHeader;
+use arrow_schema::Schema;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let mut client = FlightServiceClient::connect("http://127.0.0.1:5005").await?;
+
+    // Enviamos un Ticket vacío (Bytes)
+    let mut stream = client
+        .do_get(Request::new(Ticket {
+            ticket: Bytes::new(),
+        }))
+        .await?
+        .into_inner();
+
+    // 1) Primer mensaje => Schema IPC
+    let fd_schema: FlightData = stream
+        .message()
+        .await?
+        .ok_or_else(|| anyhow!("empty stream: expected schema first"))?;
+
+    let schema = schema_from_flightdata_ipc(&fd_schema)?;
+    // Diccionarios para decodificar batches
+    let mut dicts: HashMap<i64, Arc<dyn Array>> = HashMap::new();
+
+    // 2) Siguientes mensajes => diccionarios (si los hay) + batch(es)
+    while let Some(fd) = stream.message().await? {
+        // En 53.x, esta utilidad devuelve RecordBatch directamente
+        let batch =
+            arrow_flight::utils::flight_data_to_arrow_batch(&fd, schema.clone(), &mut dicts)?;
+        println!("{batch:?}");
+    }
+
+    Ok(())
+}
+
+fn schema_from_flightdata_ipc(fd: &FlightData) -> Result<Arc<Schema>> {
+    // El schema viene en fd.data_header (Flatbuffers)
+    let msg =
+        root_as_message(&fd.data_header[..]).map_err(|e| anyhow!("IPC: root_as_message: {e}"))?;
+    if msg.header_type() != MessageHeader::Schema {
+        return Err(anyhow!(
+            "expected MessageHeader::Schema, got {:?}",
+            msg.header_type()
+        ));
+    }
+    let fb_schema = msg
+        .header_as_schema()
+        .ok_or_else(|| anyhow!("IPC: missing schema header"))?;
+    Ok(Arc::new(fb_to_schema(fb_schema)))
+}

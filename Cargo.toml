@@ -1,0 +1,26 @@
+[package]
+name = "flight_data_rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Arrow 53.x (alineadas)
+arrow = "53.4"
+arrow-array = "53.4"
+arrow-schema = "53.4"
+arrow-ipc = "53.4"
+arrow-flight = "53.4"
+
+# gRPC stack
+tokio = { version = "1.38", features = ["full"] }
+tonic = "0.12"
+prost = "0.13"
+bytes = "1"
+tokio-stream = "0.1"
+futures = "0.3"
+
+# util
+anyhow = "1"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.20"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
