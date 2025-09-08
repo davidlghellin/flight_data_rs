@@ -1,15 +1,12 @@
-use std::process::Command;
-use std::thread;
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, process::Command, sync::Arc, thread};
 
 use anyhow::Result;
 use arrow_array::{Int32Array, RecordBatch, StringArray};
-use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
-use arrow_flight::SchemaAsIpc;
 use arrow_flight::{
+    flight_service_server::{FlightService, FlightServiceServer},
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
-    HandshakeRequest, HandshakeResponse, PollInfo, PutResult, Result as FlightResult, SchemaResult,
-    Ticket,
+    HandshakeRequest, HandshakeResponse, PollInfo, PutResult, Result as FlightResult, SchemaAsIpc,
+    SchemaResult, Ticket,
 };
 use arrow_ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
 use arrow_schema::{DataType, Field, Schema};
