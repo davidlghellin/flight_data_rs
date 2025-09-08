@@ -561,6 +561,7 @@ dependencies = [
  "arrow-flight",
  "arrow-ipc",
  "arrow-schema",
+ "arrow-select",
  "bytes",
  "chrono",
  "futures",

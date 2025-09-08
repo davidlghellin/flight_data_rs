@@ -10,6 +10,7 @@ arrow-array = "53.4"
 arrow-schema = "53.4"
 arrow-ipc = "53.4"
 arrow-flight = "53.4"
+arrow-select = "53.4"
 
 # gRPC stack
 tokio = { version = "1.38", features = ["full"] }
