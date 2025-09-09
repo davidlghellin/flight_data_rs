@@ -1,6 +1,6 @@
-// src/bin/server_parquet.rs
+use std::{fs::File, net::SocketAddr, sync::Arc};
+
 use anyhow::Result;
-use arrow_array::RecordBatch;
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
@@ -11,10 +11,8 @@ use arrow_ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
 use arrow_schema::Schema;
 use bytes::Bytes;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::{fs::File, net::SocketAddr, sync::Arc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use tracing::info;
 
 struct MyParquet;
 
@@ -30,7 +28,7 @@ impl FlightService for MyParquet {
 
     async fn handshake(
         &self,
-        _r: Request<tonic::Streaming<HandshakeRequest>>,
+        _: Request<tonic::Streaming<HandshakeRequest>>,
     ) -> Result<Response<Self::HandshakeStream>, Status> {
         Ok(Response::new(tokio_stream::once(Ok(HandshakeResponse {
             protocol_version: 0,
@@ -63,9 +61,9 @@ impl FlightService for MyParquet {
     }
 
     async fn do_get(&self, req: Request<Ticket>) -> Result<Response<Self::DoGetStream>, Status> {
-        // Esperamos un ticket tipo: parquet=/ruta/archivo.parquet&batch=65536
-        let raw: Bytes = req.into_inner().ticket;
-        let s: &str = std::str::from_utf8(&raw).unwrap_or_default();
+        // Ticket: parquet=/ruta/archivo.parquet&batch=65536
+        let raw = req.into_inner().ticket;
+        let s = std::str::from_utf8(&raw).unwrap_or_default();
 
         let mut parquet_path: Option<&str> = None;
         let mut batch_size: usize = 65536;
@@ -78,24 +76,24 @@ impl FlightService for MyParquet {
                 }
             }
         }
-        let parquet_path =
+        let parquet_path: &str =
             parquet_path.ok_or_else(|| Status::invalid_argument("missing parquet=..."))?;
 
-        // Abrir Parquet y construir reader
-        let file = File::open(parquet_path).map_err(|e| Status::internal(format!("open: {e}")))?;
+        let file: File =
+            File::open(parquet_path).map_err(|e| Status::internal(format!("open: {e}")))?;
         let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(|e| Status::internal(format!("builder: {e}")))?;
         builder = builder.with_batch_size(batch_size);
+
         let schema: Arc<Schema> = builder.schema().clone();
         let mut rb_reader = builder
             .build()
             .map_err(|e| Status::internal(format!("build: {e}")))?;
 
-        // Serialización IPC
-        let opts = IpcWriteOptions::default();
+        let opts: IpcWriteOptions = IpcWriteOptions::default();
         let schema_fd: FlightData = SchemaAsIpc::new(schema.as_ref(), &opts).into();
 
-        let mut gen = IpcDataGenerator::default();
+        let gen: IpcDataGenerator = IpcDataGenerator::default();
         let mut dict_tracker =
             DictionaryTracker::new_with_preserve_dict_id(false, opts.preserve_dict_id());
 
@@ -104,10 +102,9 @@ impl FlightService for MyParquet {
             .await
             .map_err(|_| Status::internal("tx closed"))?;
 
-        // Leer y emitir batches en streaming
         tokio::task::spawn(async move {
             for batch_res in &mut rb_reader {
-                let batch: RecordBatch = match batch_res {
+                let batch = match batch_res {
                     Ok(b) => b,
                     Err(e) => {
                         let _ = tx
@@ -167,19 +164,11 @@ impl FlightService for MyParquet {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_target(true) // quita el nombre del crate si molesta
-        .with_thread_names(true)
-        .with_line_number(true)
-        .with_file(true)
-        .init();
-
-    let addr: SocketAddr = "127.0.0.1:5006".parse()?; // otro puerto para no chocar
-    info!("🚀 Flight Parquet server en {addr}");
+pub async fn serve_parquet(addr: SocketAddr) -> Result<()> {
+    tracing::info!("🚀 Parquet Flight server en {}", addr);
+    let svc: FlightServiceServer<MyParquet> = FlightServiceServer::new(MyParquet);
     tonic::transport::Server::builder()
-        .add_service(FlightServiceServer::new(MyParquet))
+        .add_service(svc)
         .serve(addr)
         .await?;
     Ok(())

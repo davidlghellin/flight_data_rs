@@ -42,8 +42,10 @@ async fn main() -> Result<()> {
             arrow_flight::utils::flight_data_to_arrow_batch(&fd, schema.clone(), &dicts)?;
         info!("{batch:?}");
     }
-    return Ok(());
+
     // Enviamos un Ticket vacío (Bytes)
+    info!("Enviamos ticket nuevo para en memoria");
+    let mut client = FlightServiceClient::connect("http://127.0.0.1:5005").await?;
     let mut stream = client
         .do_get(Request::new(Ticket {
             ticket: Bytes::from("table=t1"), //ticket: Bytes::from("table=t2"),

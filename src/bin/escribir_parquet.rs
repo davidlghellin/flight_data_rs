@@ -7,9 +7,10 @@ use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use tracing::info;
 
+#[allow(dead_code)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_target(true) // quita el nombre del crate si molesta
+        .with_target(true)
         .with_thread_names(true)
         .with_line_number(true)
         .with_file(true)
