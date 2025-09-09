@@ -20,8 +20,29 @@ async fn main() -> Result<()> {
         .with_line_number(true)
         .with_file(true)
         .init();
-    let mut client = FlightServiceClient::connect("http://127.0.0.1:5005").await?;
+    //let mut client = FlightServiceClient::connect("http://127.0.0.1:5005").await?;
+    let mut client = FlightServiceClient::connect("http://127.0.0.1:5006").await?;
 
+    let mut stream = client
+        .do_get(Request::new(Ticket {
+            ticket: Bytes::from("parquet=/tmp/demo.parquet&batch=65536"),
+        }))
+        .await?
+        .into_inner();
+    let fd_schema: FlightData = stream
+        .message()
+        .await?
+        .ok_or_else(|| anyhow!("empty stream: expected schema first"))?;
+
+    let schema = schema_from_flightdata_ipc(&fd_schema)?;
+    // Diccionarios para decodificar batches
+    let dicts: HashMap<i64, Arc<dyn Array>> = HashMap::new();
+    while let Some(fd) = stream.message().await? {
+        let batch: RecordBatch =
+            arrow_flight::utils::flight_data_to_arrow_batch(&fd, schema.clone(), &dicts)?;
+        info!("{batch:?}");
+    }
+    return Ok(());
     // Enviamos un Ticket vacío (Bytes)
     let mut stream = client
         .do_get(Request::new(Ticket {
@@ -138,7 +159,8 @@ async fn fetch_table_batches(
 
     let mut batches: Vec<RecordBatch> = Vec::new();
     while let Some(fd) = stream.message().await? {
-        let b: RecordBatch = arrow_flight::utils::flight_data_to_arrow_batch(&fd, schema.clone(), &dicts)?;
+        let b: RecordBatch =
+            arrow_flight::utils::flight_data_to_arrow_batch(&fd, schema.clone(), &dicts)?;
         batches.push(b);
     }
     Ok((schema, batches))
@@ -230,6 +252,7 @@ fn concat_batches(schema: Arc<Schema>, batches: &[RecordBatch]) -> Result<Record
         return Ok(RecordBatch::new_empty(schema));
     }
     let ncols = schema.fields().len();
+    info!("concat_batches: ncols={ncols}, nbatches={}", batches.len());
     let mut cols: Vec<ArrayRef> = Vec::with_capacity(ncols);
 
     for c in 0..ncols {
