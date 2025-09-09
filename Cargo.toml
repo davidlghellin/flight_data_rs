@@ -27,3 +27,44 @@ anyhow = "1"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.20"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4.5.47", features = ["derive"] }
+
+[profile.dev]
+# ⚡ Compila un poco más rápido que el default (que es opt-level=0)
+opt-level = 1
+
+# Mantén símbolos de depuración completos (útil para backtraces)
+debug = true
+
+# Permite recompilaciones rápidas
+incremental = true
+
+# Chequea desbordamientos de enteros en debug (seguridad extra)
+overflow-checks = true
+
+# No uses LTO en dev, lo hace mucho más lento
+lto = false
+
+# Siempre unwind (stack unwinding) en panics en dev → mejores backtraces
+panic = "unwind"
+
+
+[profile.release]
+opt-level = 3
+lto = "thin"          # buen equilibrio rendimiento/tiempo de compilación
+codegen-units = 1     # mejor optimización cruzada
+debug = 0
+incremental = false
+overflow-checks = false
+
+[profile.test]
+inherits = "dev"
+opt-level = 0              # compila aún más rápido
+debug-assertions = true
+overflow-checks = true
+
+[profile.bench]
+inherits = "release"
+debug = true               # símbolos para perf/profilers
+lto = "thin"
+codegen-units = 1
