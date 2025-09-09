@@ -12,6 +12,8 @@ arrow-ipc = "53.4"
 arrow-flight = "53.4"
 arrow-select = "53.4"
 
+parquet = { version = "53.4", features = ["arrow"] }
+
 # gRPC stack
 tokio = { version = "1.38", features = ["full"] }
 tonic = "0.12"
