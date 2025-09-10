@@ -15,6 +15,6 @@ pub struct Args {
     pub parquet_port: u16,
 
     /// Nivel de log vía RUST_LOG (ej: debug, info, warn). Si no, usa "info".
-    #[arg(long, default_value = "DEBUG")]
+    #[arg(long, default_value = "INFO")]
     pub log: String,
 }

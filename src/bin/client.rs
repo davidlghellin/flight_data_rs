@@ -2,6 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{anyhow, Result};
 use arrow_array::{Array, ArrayRef, Int32Array, RecordBatch, StringArray, UInt32Array};
+use arrow_flight::Criteria;
 use arrow_flight::{flight_service_client::FlightServiceClient, FlightData, Ticket};
 // IPC: para reconstruir el Schema a partir del primer FlightData
 use arrow_ipc::convert::fb_to_schema;
@@ -71,6 +72,13 @@ async fn main() -> Result<()> {
         info!("{batch:?}");
     }
 
+    info!("== InMem ==");
+    list_all("http://127.0.0.1:5005").await?;
+
+    // Conéctate al server parquet (puerto 5006)
+    info!("== Parquet ==");
+    list_all("http://127.0.0.1:5006").await?;
+    println!();
     // Traer t1 y t2
     let (s1, b1) = fetch_table_batches(&mut client, "t1").await?;
     let (s2, b2) = fetch_table_batches(&mut client, "t2").await?;
@@ -267,4 +275,23 @@ fn concat_batches(schema: Arc<Schema>, batches: &[RecordBatch]) -> Result<Record
         cols.push(concat(&arrays_refs)?);
     }
     Ok(RecordBatch::try_new(schema, cols)?)
+}
+
+async fn list_all(uri: &str) -> anyhow::Result<()> {
+    let mut client = FlightServiceClient::connect(uri.to_string()).await?;
+    let mut stream = client
+        .list_flights(Request::new(Criteria {
+            expression: Bytes::new(),
+        }))
+        .await?
+        .into_inner();
+
+    while let Some(info) = stream.message().await? {
+        println!(
+            "Descriptor: {:?} | endpoints: {}",
+            info.flight_descriptor.as_ref().map(|d| &d.path),
+            info.endpoint.len()
+        );
+    }
+    Ok(())
 }

@@ -1,3 +1,4 @@
+use std::env;
 use std::{fs::File, net::SocketAddr, sync::Arc};
 
 use anyhow::Result;
@@ -10,7 +11,9 @@ use arrow_flight::{
 use arrow_ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
 use arrow_schema::Schema;
 use bytes::Bytes;
+use futures::Stream;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use std::pin::Pin;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
@@ -19,46 +22,14 @@ struct MyParquet;
 #[tonic::async_trait]
 impl FlightService for MyParquet {
     type HandshakeStream = tokio_stream::Once<Result<HandshakeResponse, Status>>;
-    type ListFlightsStream = tokio_stream::Empty<Result<FlightInfo, Status>>;
+    type ListFlightsStream =
+        Pin<Box<dyn Stream<Item = Result<FlightInfo, Status>> + Send + 'static>>;
+
     type DoGetStream = ReceiverStream<Result<FlightData, Status>>;
     type DoPutStream = tokio_stream::Empty<Result<PutResult, Status>>;
     type DoActionStream = tokio_stream::Empty<Result<FlightResult, Status>>;
     type ListActionsStream = tokio_stream::Empty<Result<ActionType, Status>>;
     type DoExchangeStream = tokio_stream::Empty<Result<FlightData, Status>>;
-
-    async fn handshake(
-        &self,
-        _: Request<tonic::Streaming<HandshakeRequest>>,
-    ) -> Result<Response<Self::HandshakeStream>, Status> {
-        Ok(Response::new(tokio_stream::once(Ok(HandshakeResponse {
-            protocol_version: 0,
-            payload: Bytes::new(),
-        }))))
-    }
-    async fn get_schema(
-        &self,
-        _: Request<FlightDescriptor>,
-    ) -> Result<Response<SchemaResult>, Status> {
-        Err(Status::unimplemented("get_schema"))
-    }
-    async fn get_flight_info(
-        &self,
-        _: Request<FlightDescriptor>,
-    ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented("get_flight_info"))
-    }
-    async fn poll_flight_info(
-        &self,
-        _: Request<FlightDescriptor>,
-    ) -> Result<Response<PollInfo>, Status> {
-        Err(Status::unimplemented("poll_flight_info"))
-    }
-    async fn list_flights(
-        &self,
-        _: Request<Criteria>,
-    ) -> Result<Response<Self::ListFlightsStream>, Status> {
-        Ok(Response::new(tokio_stream::empty()))
-    }
 
     async fn do_get(&self, req: Request<Ticket>) -> Result<Response<Self::DoGetStream>, Status> {
         // Ticket: parquet=/ruta/archivo.parquet&batch=65536
@@ -136,6 +107,92 @@ impl FlightService for MyParquet {
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn list_flights(
+        &self,
+        _req: Request<Criteria>,
+    ) -> Result<Response<Self::ListFlightsStream>, Status> {
+        let opts = IpcWriteOptions::default();
+
+        // NUEVO: lee lista de ficheros:  PARQUET_LIST=/data/a.parquet,/data/b.parquet
+        let list = env::var("PARQUET_LIST").unwrap_or("/tmp/demo.parquet".into());
+        println!("parquet files: {}", list);
+        let paths: Vec<String> = list
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut infos: Vec<Result<FlightInfo, Status>> = Vec::new();
+
+        for path in paths {
+            // intenta abrir y leer solo el schema
+            if let Ok(file) = std::fs::File::open(&path) {
+                if let Ok(builder) =
+                    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+                {
+                    let schema: Arc<Schema> = builder.schema().clone();
+                    let schema_fd: FlightData = SchemaAsIpc::new(schema.as_ref(), &opts).into();
+
+                    let desc = FlightDescriptor {
+                        r#type: arrow_flight::flight_descriptor::DescriptorType::Path as i32,
+                        cmd: Bytes::new(),
+                        path: vec!["parquet".into(), path.clone()],
+                    };
+                    let endpoint = arrow_flight::FlightEndpoint {
+                        ticket: Some(Ticket {
+                            ticket: Bytes::from(format!("parquet={path}")),
+                        }),
+                        location: vec![],
+                        expiration_time: None,
+                        app_metadata: Bytes::new(),
+                    };
+
+                    infos.push(Ok(FlightInfo {
+                        schema: schema_fd.data_header.clone(),
+                        flight_descriptor: Some(desc),
+                        endpoint: vec![endpoint],
+                        total_records: -1,
+                        total_bytes: -1,
+                        ordered: false,
+                        app_metadata: Bytes::new(),
+                    }));
+                    continue;
+                }
+            }
+            tracing::warn!(%path, "no se pudo abrir/leer schema; omitido en list_flights");
+        }
+
+        Ok(Response::new(Box::pin(tokio_stream::iter(infos))))
+    }
+
+    async fn handshake(
+        &self,
+        _: Request<tonic::Streaming<HandshakeRequest>>,
+    ) -> Result<Response<Self::HandshakeStream>, Status> {
+        Ok(Response::new(tokio_stream::once(Ok(HandshakeResponse {
+            protocol_version: 0,
+            payload: Bytes::new(),
+        }))))
+    }
+    async fn get_schema(
+        &self,
+        _: Request<FlightDescriptor>,
+    ) -> Result<Response<SchemaResult>, Status> {
+        Err(Status::unimplemented("get_schema"))
+    }
+    async fn get_flight_info(
+        &self,
+        _: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        Err(Status::unimplemented("get_flight_info"))
+    }
+    async fn poll_flight_info(
+        &self,
+        _: Request<FlightDescriptor>,
+    ) -> Result<Response<PollInfo>, Status> {
+        Err(Status::unimplemented("poll_flight_info"))
     }
 
     async fn do_put(

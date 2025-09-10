@@ -11,6 +11,8 @@ use arrow_flight::{
 use arrow_ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
+use futures::Stream;
+use std::pin::Pin;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
@@ -21,12 +23,102 @@ struct InMem {
 #[tonic::async_trait]
 impl FlightService for InMem {
     type HandshakeStream = tokio_stream::Once<Result<HandshakeResponse, Status>>;
-    type ListFlightsStream = tokio_stream::Empty<Result<FlightInfo, Status>>;
+    type ListFlightsStream =
+        Pin<Box<dyn Stream<Item = Result<FlightInfo, Status>> + Send + 'static>>;
+
     type DoGetStream = ReceiverStream<Result<FlightData, Status>>;
     type DoPutStream = tokio_stream::Empty<Result<PutResult, Status>>;
     type DoActionStream = tokio_stream::Empty<Result<FlightResult, Status>>;
     type ListActionsStream = tokio_stream::Empty<Result<ActionType, Status>>;
     type DoExchangeStream = tokio_stream::Empty<Result<FlightData, Status>>;
+
+    async fn do_get(&self, req: Request<Ticket>) -> Result<Response<Self::DoGetStream>, Status> {
+        // Ticket esperado: "table=t1" | "table=t2"
+        let raw: Bytes = req.into_inner().ticket;
+        let s: &str = std::str::from_utf8(&raw).unwrap_or_default();
+        let table_name: &str = s.strip_prefix("table=").unwrap_or(s);
+
+        let batch: RecordBatch = self
+            .tables
+            .get(table_name)
+            .ok_or_else(|| Status::not_found(format!("table not found: {table_name}")))?
+            .clone();
+
+        let opts: IpcWriteOptions = IpcWriteOptions::default();
+        let schema_fd: FlightData = SchemaAsIpc::new(batch.schema().as_ref(), &opts).into();
+
+        let gen: IpcDataGenerator = IpcDataGenerator::default();
+        let mut dict_tracker: DictionaryTracker =
+            DictionaryTracker::new_with_preserve_dict_id(false, opts.preserve_dict_id());
+        let (encoded_dicts, encoded_batch) = gen
+            .encoded_batch(&batch, &mut dict_tracker, &opts)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let dict_fds: Vec<FlightData> = encoded_dicts.into_iter().map(Into::into).collect();
+        let batch_fd: FlightData = encoded_batch.into();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        tx.send(Ok(schema_fd))
+            .await
+            .map_err(|_| Status::internal("tx closed"))?;
+        for d in dict_fds {
+            tx.send(Ok(d))
+                .await
+                .map_err(|_| Status::internal("tx closed"))?;
+        }
+        tx.send(Ok(batch_fd))
+            .await
+            .map_err(|_| Status::internal("tx closed"))?;
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn list_flights(
+        &self,
+        _req: Request<Criteria>,
+    ) -> Result<Response<Self::ListFlightsStream>, Status> {
+        // Construye un FlightInfo por cada tabla en memoria
+        let opts: IpcWriteOptions = IpcWriteOptions::default();
+
+        let mut infos: Vec<std::result::Result<FlightInfo, Status>> =
+            Vec::with_capacity(self.tables.len());
+        for (name, batch) in &self.tables {
+            // Serializa el schema a IPC (usamos el header del FlightData)
+            let schema_fd: FlightData = SchemaAsIpc::new(batch.schema().as_ref(), &opts).into();
+
+            // Descriptor tipo PATH: ["table", "<nombre>"]
+            let desc: FlightDescriptor = FlightDescriptor {
+                r#type: arrow_flight::flight_descriptor::DescriptorType::Path as i32,
+                cmd: Bytes::new(),
+                path: vec!["table".to_string(), name.clone()],
+            };
+
+            // Un endpoint con ticket "table=<nombre>" (sin locations → mismo server)
+            let endpoint: arrow_flight::FlightEndpoint = arrow_flight::FlightEndpoint {
+                ticket: Some(Ticket {
+                    ticket: Bytes::from(format!("table={name}")),
+                }),
+                location: vec![],
+                expiration_time: None,
+                app_metadata: Bytes::new(),
+            };
+
+            let info: FlightInfo = FlightInfo {
+                schema: schema_fd.data_header.clone(), // bytes IPC del schema
+                flight_descriptor: Some(desc),
+                endpoint: vec![endpoint],
+                total_records: -1, // desconocido
+                total_bytes: -1,   // desconocido
+                ordered: false,
+                app_metadata: Bytes::new(),
+            };
+
+            infos.push(Ok(info));
+        }
+
+        // Devuelve un stream con todos los FlightInfo
+        let stream = tokio_stream::iter(infos);
+        Ok(Response::new(Box::pin(stream)))
+    }
 
     async fn handshake(
         &self,
@@ -55,52 +147,6 @@ impl FlightService for InMem {
         _: Request<FlightDescriptor>,
     ) -> Result<Response<PollInfo>, Status> {
         Err(Status::unimplemented("poll_flight_info"))
-    }
-    async fn list_flights(
-        &self,
-        _: Request<Criteria>,
-    ) -> Result<Response<Self::ListFlightsStream>, Status> {
-        Ok(Response::new(tokio_stream::empty()))
-    }
-
-    async fn do_get(&self, req: Request<Ticket>) -> Result<Response<Self::DoGetStream>, Status> {
-        // Ticket esperado: "table=t1" | "table=t2"
-        let raw = req.into_inner().ticket;
-        let s = std::str::from_utf8(&raw).unwrap_or_default();
-        let table_name = s.strip_prefix("table=").unwrap_or(s);
-
-        let batch = self
-            .tables
-            .get(table_name)
-            .ok_or_else(|| Status::not_found(format!("table not found: {table_name}")))?
-            .clone();
-
-        let opts = IpcWriteOptions::default();
-        let schema_fd: FlightData = SchemaAsIpc::new(batch.schema().as_ref(), &opts).into();
-
-        let gen = IpcDataGenerator::default();
-        let mut dict_tracker =
-            DictionaryTracker::new_with_preserve_dict_id(false, opts.preserve_dict_id());
-        let (encoded_dicts, encoded_batch) = gen
-            .encoded_batch(&batch, &mut dict_tracker, &opts)
-            .map_err(|e| Status::internal(e.to_string()))?;
-        let dict_fds: Vec<FlightData> = encoded_dicts.into_iter().map(Into::into).collect();
-        let batch_fd: FlightData = encoded_batch.into();
-
-        let (tx, rx) = tokio::sync::mpsc::channel(8);
-        tx.send(Ok(schema_fd))
-            .await
-            .map_err(|_| Status::internal("tx closed"))?;
-        for d in dict_fds {
-            tx.send(Ok(d))
-                .await
-                .map_err(|_| Status::internal("tx closed"))?;
-        }
-        tx.send(Ok(batch_fd))
-            .await
-            .map_err(|_| Status::internal("tx closed"))?;
-
-        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     async fn do_put(
